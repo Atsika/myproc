@@ -41,7 +41,7 @@ func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *wind
 	procAddr = ResolveFunctionAddr(dll, procedure)
 
 	// Check if this is a forwarded function
-	for IsForwardedFunction(procAddr, exportDir, dataDir.Size) {
+	for isForwardedFunction(procAddr, exportDir, dataDir.Size) {
 		forwardName := windows.BytePtrToString((*byte)(unsafe.Pointer(procAddr)))
 		forward := strings.Split(forwardName, ".")
 
@@ -85,7 +85,7 @@ Found:
 	return proc
 }
 
-// ResokveFunctionAddr returns the address of a function. Search by name, ordinal or hash.
+// ResolveFunctionAddr returns the address of a function. Search by name, ordinal or hash.
 func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) uintptr {
 
 	if dll == nil || dll.Handle == 0 {
@@ -111,8 +111,7 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	}
 
 	module := unsafe.Pointer(dll.Handle)
-	dataDir := GetDataDirectory(module, IMAGE_DIRECTORY_ENTRY_EXPORT)
-	exportDir := (*IMAGE_EXPORT_DIRECTORY)(unsafe.Add(module, dataDir.VirtualAddress))
+	exportDir := GetExportDirectory(module)
 
 	addrOfFunctions := unsafe.Add(module, exportDir.AddressOfFunctions)
 	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
@@ -175,8 +174,7 @@ func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	}
 
 	module := unsafe.Pointer(dll.Handle)
-	dataDir := GetDataDirectory(module, IMAGE_DIRECTORY_ENTRY_EXPORT)
-	exportDir := (*IMAGE_EXPORT_DIRECTORY)(unsafe.Add(module, dataDir.VirtualAddress))
+	exportDir := GetExportDirectory(module)
 
 	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
 	addrOfNameOrdinals := unsafe.Add(module, exportDir.AddressOfNameOrdinals)
@@ -211,8 +209,8 @@ func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	return ""
 }
 
-// IsForwardedFunction checks if the proc is valid, if not it's a forwarded function
-func IsForwardedFunction(procAddr uintptr, exportDir *IMAGE_EXPORT_DIRECTORY, exportDirSize uint32) bool {
+// isForwardedFunction checks if the proc is valid, if not it's a forwarded function
+func isForwardedFunction(procAddr uintptr, exportDir *IMAGE_EXPORT_DIRECTORY, exportDirSize uint32) bool {
 	if procAddr >= uintptr(unsafe.Pointer(exportDir)) && procAddr < uintptr(unsafe.Pointer(exportDir))+uintptr(exportDirSize) {
 		return true
 	}

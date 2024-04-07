@@ -23,6 +23,10 @@ func GetDataDirectory(module unsafe.Pointer, entry int) *IMAGE_DATA_DIRECTORY {
 	return (*IMAGE_DATA_DIRECTORY)(unsafe.Pointer(&ntHdrs.OptionalHeader.DataDirectory[entry]))
 }
 
+func GetExportDirectory(module unsafe.Pointer) *IMAGE_EXPORT_DIRECTORY {
+	return (*IMAGE_EXPORT_DIRECTORY)(unsafe.Pointer(uintptr(module) + uintptr(GetDataDirectory(module, IMAGE_DIRECTORY_ENTRY_EXPORT).VirtualAddress)))
+}
+
 // ImageFirstSection returns the first section by parsing NT headers
 func ImageFirstSection(ntHdrs *IMAGE_NT_HEADERS) *IMAGE_SECTION_HEADER {
 	return (*IMAGE_SECTION_HEADER)(unsafe.Pointer((uintptr(unsafe.Pointer(ntHdrs)) + unsafe.Offsetof(ntHdrs.OptionalHeader) + uintptr(ntHdrs.FileHeader.SizeOfOptionalHeader))))
