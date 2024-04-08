@@ -13,8 +13,6 @@ func main() {
 
 	NtQueryInformationProcess := myproc.NewProc(ntdll, uint16(0x1f1))
 	fmt.Printf("[ordinal]  NtQueryInformationProcess => %#2x\n", NtQueryInformationProcess.Addr())
-	fmt.Printf("[ordinal]  NtQueryInformationProcess => %s\n", NtQueryInformationProcess.Name)
-
 
 	kernel32 := myproc.NewDLL("kernel32.dll")
 	fmt.Printf("[string] kernel32 => %#2x\n", kernel32.Handle)

@@ -14,12 +14,12 @@ import (
 
 // ResolveApiSet returns the name of the real function host.
 func ResolveApiSet(apiSet string, parentName string) string {
-	apiNamespace := GetApiSetNamespace()
+	ns := GetApiSetNamespace()
 
 	// api-ms-win-core-apiquery-l1-1-0.dll -> api-ms-win-core-apiquery-l1-1
 	apiToResolve := apiSet[:strings.LastIndex(apiSet, "-")]
 
-	entry := apiNamespace.SearchForApiSet(apiToResolve)
+	entry := ns.SearchForApiSet(apiToResolve)
 	if entry == nil {
 		return ""
 	}
@@ -27,14 +27,12 @@ func ResolveApiSet(apiSet string, parentName string) string {
 	hostLibEntry := new(API_SET_VALUE_ENTRY)
 
 	if entry.ValueCount > 1 && parentName != "" {
-		hostLibEntry = apiNamespace.SearchForApiSetHost(entry, parentName)
+		hostLibEntry = ns.SearchForApiSetHost(entry, parentName)
 	} else if entry.ValueCount > 0 {
-		hostLibEntry = apiNamespace.GetNsValueEntry(entry, 0)
+		hostLibEntry = entry.GetValueEntry(0)
 	}
 
-	name := apiNamespace.GetApiSetValueEntryValue(hostLibEntry)
-
-	return name
+	return hostLibEntry.Value()
 }
 
 // GetApiSetNamespace returns an API_SET_NAMESPACE structure from PEB
@@ -42,24 +40,29 @@ func GetApiSetNamespace() *API_SET_NAMESPACE {
 	return GetPEB().ApiSetMap
 }
 
-func (apins *API_SET_NAMESPACE) SearchForApiSet(apiToResolve string) *API_SET_NAMESPACE_ENTRY {
+// GetApiSetNamespacePtr returns a pointer to the API_SET_NAMESPACE structure from PEB
+func GetApiSetNamespacePtr() unsafe.Pointer {
+	return unsafe.Pointer(GetApiSetNamespace())
+}
+
+// SearchForApiSet searches for an API set in the API set namespace
+func (ns *API_SET_NAMESPACE) SearchForApiSet(apiToResolve string) *API_SET_NAMESPACE_ENTRY {
 	lower := strings.ToLower(apiToResolve)
 	hashKey := uint32(0)
 
 	for i := 0; i < len(lower); i++ {
-		hashKey = hashKey*apins.HashFactor + uint32(lower[i])
+		hashKey = hashKey*ns.HashFactor + uint32(lower[i])
 	}
 
 	// binary search
 	low := uint32(0)
 	middle := uint32(0)
-	high := apins.Count - 1
+	high := ns.Count - 1
 
 	hashEntry := new(API_SET_HASH_ENTRY)
-
 	for high >= low {
 		middle = (high + low) >> 1
-		hashEntry = apins.GetHashEntry(middle)
+		hashEntry = ns.GetHashEntry(middle)
 
 		if hashKey < hashEntry.Hash {
 			high = middle - 1
@@ -75,8 +78,8 @@ func (apins *API_SET_NAMESPACE) SearchForApiSet(apiToResolve string) *API_SET_NA
 		return nil
 	}
 
-	foundEntry := apins.GetNsEntry(hashEntry.Index)
-	name := apins.GetValueName(foundEntry)
+	foundEntry := ns.GetNsEntry(hashEntry.Index)
+	name := foundEntry.Name()
 
 	// equivalent to truncate after last hyphen
 	if strings.HasPrefix(lower, strings.ToLower(name)) {
@@ -86,24 +89,23 @@ func (apins *API_SET_NAMESPACE) SearchForApiSet(apiToResolve string) *API_SET_NA
 	return foundEntry
 }
 
+// SearchForApiSetHost searches for an API set host in the API set namespace
 func (apins *API_SET_NAMESPACE) SearchForApiSetHost(entry *API_SET_NAMESPACE_ENTRY, apiToResolve string) *API_SET_VALUE_ENTRY {
 
-	foundEntry := apins.GetNsValueEntry(entry, 0)
+	foundEntry := entry.GetValueEntry(0)
 
 	high := entry.ValueCount - 1
 	if high == 0 {
 		return foundEntry
 	}
 
-	apiSetHostEntry := new(API_SET_VALUE_ENTRY)
-
+	host := new(API_SET_VALUE_ENTRY)
 	for low := uint32(1); low <= high; {
 		middle := (low + high) >> 1
-		apiSetHostEntry = apins.GetNsValueEntry(entry, middle)
-
-		switch name := apins.GetValueEntryName(apiSetHostEntry); {
+		host = entry.GetValueEntry(middle)
+		switch name := host.Name(); {
 		case apiToResolve == name:
-			return apins.GetNsValueEntry(entry, middle)
+			return host
 		case apiToResolve < name:
 			high = middle - 1
 		case apiToResolve > name:
@@ -114,31 +116,37 @@ func (apins *API_SET_NAMESPACE) SearchForApiSetHost(entry *API_SET_NAMESPACE_ENT
 	return nil
 }
 
-func (apins *API_SET_NAMESPACE) GetHashEntry(index uint32) *API_SET_HASH_ENTRY {
-	return (*API_SET_HASH_ENTRY)(unsafe.Add(unsafe.Pointer(apins), apins.HashOffset+index*uint32(unsafe.Sizeof(API_SET_HASH_ENTRY{}))))
+// GetHashEntry returns the API_SET_HASH_ENTRY at the specified index
+func (ns *API_SET_NAMESPACE) GetHashEntry(i uint32) *API_SET_HASH_ENTRY {
+	return (*API_SET_HASH_ENTRY)(unsafe.Add(unsafe.Pointer(ns), ns.HashOffset+(i*uint32(unsafe.Sizeof(API_SET_HASH_ENTRY{})))))
 }
 
-func (apins *API_SET_NAMESPACE) GetNsEntry(index uint32) *API_SET_NAMESPACE_ENTRY {
-	return (*API_SET_NAMESPACE_ENTRY)(unsafe.Add(unsafe.Pointer(apins), apins.EntryOffset+index*uint32(unsafe.Sizeof(API_SET_NAMESPACE_ENTRY{}))))
+// GetNsEntry returns the API_SET_NAMESPACE_ENTRY at the specified index
+func (ns *API_SET_NAMESPACE) GetNsEntry(i uint32) *API_SET_NAMESPACE_ENTRY {
+	return (*API_SET_NAMESPACE_ENTRY)(unsafe.Add(unsafe.Pointer(ns), ns.EntryOffset+(i*uint32(unsafe.Sizeof(API_SET_NAMESPACE_ENTRY{})))))
 }
 
-func (apins *API_SET_NAMESPACE) GetValueName(entry *API_SET_NAMESPACE_ENTRY) string {
-	name := (*uint16)(unsafe.Add(unsafe.Pointer(apins), entry.NameOffset))
+// Name returns the name of the given API_SET_VALUE_ENTRY
+func (entry *API_SET_NAMESPACE_ENTRY) Name() string {
+	name := (*uint16)(unsafe.Add(GetApiSetNamespacePtr(), entry.NameOffset))
 	return windows.UTF16PtrToString(name)
 }
 
-func (apins *API_SET_NAMESPACE) GetNsValueEntry(entry *API_SET_NAMESPACE_ENTRY, index uint32) *API_SET_VALUE_ENTRY {
-	return (*API_SET_VALUE_ENTRY)(unsafe.Add(unsafe.Pointer(apins), entry.ValueOffset+index*uint32(unsafe.Sizeof(API_SET_VALUE_ENTRY{}))))
+// GetNsValueEntry returns the API_SET_VALUE_ENTRY at the specified index
+func (entry *API_SET_NAMESPACE_ENTRY) GetValueEntry(i uint32) *API_SET_VALUE_ENTRY {
+	return (*API_SET_VALUE_ENTRY)(unsafe.Add(GetApiSetNamespacePtr(), entry.ValueOffset+(i*uint32(unsafe.Sizeof(API_SET_VALUE_ENTRY{})))))
 }
 
-func (apins *API_SET_NAMESPACE) GetApiSetValueEntryValue(entry *API_SET_VALUE_ENTRY) string {
-	value := (*uint16)(unsafe.Add(unsafe.Pointer(apins), entry.ValueOffset))
-	name := unsafe.Slice(value, entry.ValueLength/2)
+// Value returns the value of the given API_SET_VALUE_ENTRY
+func (entry *API_SET_VALUE_ENTRY) Value() string {
+	value := (*uint16)(unsafe.Add(GetApiSetNamespacePtr(), entry.ValueOffset))
+	name := unsafe.Slice(value, entry.ValueLength/uint32(unsafe.Sizeof(uint16(0))))
 	return windows.UTF16ToString(name)
 }
 
-func (apins *API_SET_NAMESPACE) GetValueEntryName(entry *API_SET_VALUE_ENTRY) string {
-	value := (*uint16)(unsafe.Add(unsafe.Pointer(apins), entry.NameOffset))
-	name := unsafe.Slice(value, entry.NameLength/2)
+// Name returns the name of the given API_SET_VALUE_ENTRY
+func (entry *API_SET_VALUE_ENTRY) Name() string {
+	value := (*uint16)(unsafe.Add(GetApiSetNamespacePtr(), entry.NameOffset))
+	name := unsafe.Slice(value, entry.NameLength/uint32(unsafe.Sizeof(uint16(0))))
 	return windows.UTF16ToString(name)
 }

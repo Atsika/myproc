@@ -8,11 +8,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const (
-	sizeofUint16 = unsafe.Sizeof(uint16(0))
-	sizeofUint32 = unsafe.Sizeof(uint32(0))
-)
-
 // NewProc is the reimplementation of GetProcAddress using binary search (3x faster) with a linear search fallback.
 // It implements search by name, ordinal or hash.
 func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *windows.Proc {
@@ -21,27 +16,24 @@ func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *wind
 		return nil
 	}
 
-	var procName string
-	var procAddr uintptr
 	// In case this is a forwarded function
 	var parent string
-
-	switch reflect.TypeOf(procedure).Kind() {
-	case reflect.String:
-		procName = any(procedure).(string)
-	}
 
 	proc := new(windows.Proc)
 	proc.Dll = dll
 
-	module := unsafe.Pointer(dll.Handle)
-	dataDir := GetDataDirectory(module, IMAGE_DIRECTORY_ENTRY_EXPORT)
-	exportDir := (*IMAGE_EXPORT_DIRECTORY)(unsafe.Add(module, dataDir.VirtualAddress))
+	switch reflect.TypeOf(procedure).Kind() {
+	case reflect.String:
+		proc.Name = any(procedure).(string)
+	}
 
-	procAddr = ResolveFunctionAddr(dll, procedure)
+	dataDir := GetDataDirectory(dll.Handle, IMAGE_DIRECTORY_ENTRY_EXPORT)
+	exportDir := GetExportDirectory(dll.Handle)
+
+	procAddr := ResolveFunctionAddr(dll, procedure)
 
 	// Check if this is a forwarded function
-	for isForwardedFunction(procAddr, exportDir, dataDir.Size) {
+	for IsForwardedFunction(procAddr, exportDir, dataDir.Size) {
 		forwardName := windows.BytePtrToString((*byte)(unsafe.Pointer(procAddr)))
 		forward := strings.Split(forwardName, ".")
 
@@ -52,11 +44,9 @@ func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *wind
 			if !strings.HasPrefix(host, "api-") && !strings.HasPrefix(host, "ext-") {
 				parent = host
 			}
-
 			// Set new dll
 			proc.Dll = NewDLL(host)
-			module = unsafe.Pointer(proc.Dll.Handle)
-			exportDir = GetExportDirectory(module)
+			exportDir = GetExportDirectory(proc.Dll.Handle)
 			// Resolve again
 			procAddr = ResolveFunctionAddr(proc.Dll, forward[1])
 		} else {
@@ -64,29 +54,19 @@ func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *wind
 		}
 	}
 
+	// Still not found ? return nil
 	if procAddr != 0 {
-		// Set proc name
-		if procName != "" {
-			proc.Name = procName
-		} else {
-			proc.Name = ResolveFunctionName(proc.Dll, procedure)
-		}
-		goto Found
+		// trick to set unexported addr field in windows.Proc structure
+		addr := reflect.ValueOf(proc).Elem().FieldByName("addr")
+		reflect.NewAt(addr.Type(), unsafe.Pointer(addr.UnsafeAddr())).Elem().Set(reflect.ValueOf(procAddr))
+		return proc
 	}
 
 	return nil
-
-Found:
-	// trick to set unexported addr field in windows.Proc structure
-	addr := reflect.ValueOf(proc).Elem().FieldByName("addr")
-	reflect.NewAt(addr.Type(), unsafe.Pointer(addr.UnsafeAddr())).Elem().Set(reflect.ValueOf(procAddr))
-
-	return proc
 }
 
 // ResolveFunctionAddr returns the address of a function. Search by name, ordinal or hash.
 func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) uintptr {
-
 	if dll == nil || dll.Handle == 0 {
 		return 0
 	}
@@ -110,7 +90,7 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	}
 
 	module := unsafe.Pointer(dll.Handle)
-	exportDir := GetExportDirectory(module)
+	exportDir := GetExportDirectory(dll.Handle)
 
 	addrOfFunctions := unsafe.Add(module, exportDir.AddressOfFunctions)
 	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
@@ -122,20 +102,22 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 
 	// ordinal search
 	if procOrdinal != 0 {
-		procOrdinal = procOrdinal - uint16(exportDir.Base)
-		rva := sliceOfFunctions[procOrdinal]
-		procAddr = uintptr(unsafe.Add(module, rva))
+		procOrdinal -= uint16(exportDir.Base)
+		procAddr = uintptr(unsafe.Add(module, sliceOfFunctions[procOrdinal]))
 		return procAddr
 	}
 
 	// binary search
 	if procName != "" {
+
 		left := uintptr(0)
 		right := uintptr(exportDir.NumberOfNames - 1)
 
 		for left != right {
+
 			middle := left + ((right - left) >> 1)
 			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[middle])))
+
 			if Hash(currentName) == procHash {
 				index := sliceOfAddrOfNameOrdinals[middle]
 				procAddr = uintptr(unsafe.Add(module, sliceOfFunctions[index]))
@@ -164,59 +146,8 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	return 0
 }
 
-// ResolveFunctionName returns the name of a function. Search by ordinal or hash. string is only used to comply with generics.
-func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) string {
-	var procOrdinal uint16
-	var procHash uint32
-
-	switch reflect.TypeOf(procedure).Kind() {
-	case reflect.Uint16:
-		procOrdinal = any(procedure).(uint16)
-	case reflect.Uint32:
-		procHash = any(procedure).(uint32)
-	case reflect.String: // This should never happened
-		return ""
-	}
-
-	module := unsafe.Pointer(dll.Handle)
-	exportDir := GetExportDirectory(module)
-
-	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
-	addrOfNameOrdinals := unsafe.Add(module, exportDir.AddressOfNameOrdinals)
-
-	sliceOfNames := unsafe.Slice((*uint32)(addrOfNames), exportDir.NumberOfNames)
-	sliceOfNameOrdinals := unsafe.Slice((*uint16)(addrOfNameOrdinals), exportDir.NumberOfNames)
-
-	if procOrdinal != 0 {
-		// Map each function name to an ordinal (inspired from PE-bear)
-		ordinalToName := make(map[uint16]uintptr)
-		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
-			nameOrdinal := sliceOfNameOrdinals[i]
-			ordinalToName[nameOrdinal] = i - uintptr(exportDir.Base)
-		}
-
-		// If a name exist for this ordinal, retrieve it
-		nameIndex, ok := ordinalToName[procOrdinal]
-		if ok {
-			return windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[nameIndex])))
-		}
-	}
-
-	// linear search
-	if procHash != 0 {
-		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
-			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[i])))
-			if Hash(currentName) == procHash {
-				return currentName
-			}
-		}
-	}
-
-	return ""
-}
-
-// isForwardedFunction checks if the proc is valid, if not it's a forwarded function
-func isForwardedFunction(procAddr uintptr, exportDir *IMAGE_EXPORT_DIRECTORY, exportDirSize uint32) bool {
+// IsForwardedFunction checks if the proc is valid, if not it's a forwarded function
+func IsForwardedFunction(procAddr uintptr, exportDir *IMAGE_EXPORT_DIRECTORY, exportDirSize uint32) bool {
 	if procAddr >= uintptr(unsafe.Pointer(exportDir)) && procAddr < uintptr(unsafe.Pointer(exportDir))+uintptr(exportDirSize) {
 		return true
 	}

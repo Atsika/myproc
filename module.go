@@ -8,6 +8,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const (
+	kernel32H    uint32 = 0xa3e6f6c3 // kernel32.dll
+	loadlibraryH uint32 = 0x3bbc54d9 // loadlibraryw
+)
+
 // NewDLL parses PEB's InLoadOrderModuleList to retrieve a DLL handle.
 // Pass an empty string or 0 to retrieve the current module.
 func NewDLL[T ~string | ~uint32](module T) *windows.DLL {
@@ -28,8 +33,7 @@ func NewDLL[T ~string | ~uint32](module T) *windows.DLL {
 		modHash = Hash(modName)
 	}
 
-	peb := GetPEB()
-	head := peb.Ldr.InLoadOrderModuleList
+	head := GetPEB().Ldr.InLoadOrderModuleList
 
 	// current module = first entry
 	if modName == "" && modHash == 0 {
@@ -52,8 +56,8 @@ func NewDLL[T ~string | ~uint32](module T) *windows.DLL {
 
 	// LoadLibrary fallback
 	if modName != "" {
-		kernel32 := NewDLL(uint32(0xa3e6f6c3))
-		LoadLibrary := NewProc(kernel32, uint32(0x3bbc54d9))
+		kernel32 := NewDLL(kernel32H)
+		LoadLibrary := NewProc(kernel32, loadlibraryH)
 		handle, _, _ := LoadLibrary.Call(uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(modName))))
 		if handle != 0 {
 			dll.Name = modName
@@ -63,5 +67,4 @@ func NewDLL[T ~string | ~uint32](module T) *windows.DLL {
 	}
 
 	return nil
-
 }
