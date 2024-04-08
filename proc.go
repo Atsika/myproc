@@ -190,11 +190,9 @@ func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	if procOrdinal != 0 {
 		// Map each function name to an ordinal (inspired from PE-bear)
 		ordinalToName := make(map[uint16]uintptr)
-		nameOrdRVA := addrOfNameOrdinals
 		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
 			nameOrdinal := sliceOfNameOrdinals[i]
-			ordinalToName[nameOrdinal] = i
-			nameOrdRVA = unsafe.Add(nameOrdRVA, sizeofUint16)
+			ordinalToName[nameOrdinal] = i - uintptr(exportDir.Base)
 		}
 
 		// If a name exist for this ordinal, retrieve it
