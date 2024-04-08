@@ -56,8 +56,7 @@ func NewProc[T ~string | ~uint16 | ~uint32](dll *windows.DLL, procedure T) *wind
 			// Set new dll
 			proc.Dll = NewDLL(host)
 			module = unsafe.Pointer(proc.Dll.Handle)
-			dataDir = GetDataDirectory(module, IMAGE_DIRECTORY_ENTRY_EXPORT)
-			exportDir = (*IMAGE_EXPORT_DIRECTORY)(unsafe.Add(module, dataDir.VirtualAddress))
+			exportDir = GetExportDirectory(module)
 			// Resolve again
 			procAddr = ResolveFunctionAddr(proc.Dll, forward[1])
 		} else {
@@ -107,7 +106,7 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	}
 
 	if procHash == 0 && procName != "" {
-		procHash = Hash(strings.ToLower(procName))
+		procHash = Hash(procName)
 	}
 
 	module := unsafe.Pointer(dll.Handle)
@@ -117,11 +116,16 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
 	addrOfNameOrdinals := unsafe.Add(module, exportDir.AddressOfNameOrdinals)
 
+	sliceOfFunctions := unsafe.Slice((*uint32)(addrOfFunctions), exportDir.NumberOfFunctions)
+	sliceOfNames := unsafe.Slice((*uint32)(addrOfNames), exportDir.NumberOfNames)
+	sliceOfAddrOfNameOrdinals := unsafe.Slice((*uint16)(addrOfNameOrdinals), exportDir.NumberOfNames)
+
 	// ordinal search
 	if procOrdinal != 0 {
 		procOrdinal = procOrdinal - uint16(exportDir.Base)
-		rva := *(*uint32)(unsafe.Add(addrOfFunctions, procOrdinal*uint16(sizeofUint32)))
-		procAddr = uintptr(module) + uintptr(rva)
+		rva := sliceOfFunctions[procOrdinal]
+		procAddr = uintptr(unsafe.Add(module, rva))
+		return procAddr
 	}
 
 	// binary search
@@ -131,10 +135,10 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 
 		for left != right {
 			middle := left + ((right - left) >> 1)
-			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, *(*uint32)(unsafe.Add(addrOfNames, middle*sizeofUint32)))))
+			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[middle])))
 			if Hash(currentName) == procHash {
-				index := *(*uint16)(unsafe.Add(addrOfNameOrdinals, middle*sizeofUint16))
-				procAddr = uintptr(module) + uintptr(*(*uint32)(unsafe.Add(addrOfFunctions, index*uint16(sizeofUint32))))
+				index := sliceOfAddrOfNameOrdinals[middle]
+				procAddr = uintptr(unsafe.Add(module, sliceOfFunctions[index]))
 				return procAddr
 			} else if currentName < procName {
 				left = middle + 1
@@ -146,11 +150,12 @@ func ResolveFunctionAddr[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 
 	// linear search
 	if procAddr == 0 {
+
 		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
-			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, *(*uint32)(unsafe.Add(addrOfNames, i*sizeofUint32)))))
+			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[i])))
 			if Hash(currentName) == procHash {
-				index := *(*uint16)(unsafe.Add(addrOfNameOrdinals, i*sizeofUint16))
-				procAddr = uintptr(module) + uintptr(*(*uint32)(unsafe.Add(addrOfFunctions, index*uint16(sizeofUint32))))
+				index := sliceOfAddrOfNameOrdinals[i]
+				procAddr = uintptr(unsafe.Add(module, sliceOfFunctions[index]))
 				return procAddr
 			}
 		}
@@ -179,12 +184,15 @@ func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 	addrOfNames := unsafe.Add(module, exportDir.AddressOfNames)
 	addrOfNameOrdinals := unsafe.Add(module, exportDir.AddressOfNameOrdinals)
 
+	sliceOfNames := unsafe.Slice((*uint32)(addrOfNames), exportDir.NumberOfNames)
+	sliceOfNameOrdinals := unsafe.Slice((*uint16)(addrOfNameOrdinals), exportDir.NumberOfNames)
+
 	if procOrdinal != 0 {
 		// Map each function name to an ordinal (inspired from PE-bear)
 		ordinalToName := make(map[uint16]uintptr)
 		nameOrdRVA := addrOfNameOrdinals
 		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
-			nameOrdinal := *(*uint16)(unsafe.Add(addrOfNameOrdinals, i*sizeofUint16))
+			nameOrdinal := sliceOfNameOrdinals[i]
 			ordinalToName[nameOrdinal] = i
 			nameOrdRVA = unsafe.Add(nameOrdRVA, sizeofUint16)
 		}
@@ -192,14 +200,14 @@ func ResolveFunctionName[T ~string | ~uint16 | ~uint32](dll *windows.DLL, proced
 		// If a name exist for this ordinal, retrieve it
 		nameIndex, ok := ordinalToName[procOrdinal]
 		if ok {
-			return windows.BytePtrToString((*byte)(unsafe.Add(module, *(*uint32)(unsafe.Add(addrOfNames, nameIndex*sizeofUint32)))))
+			return windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[nameIndex])))
 		}
 	}
 
 	// linear search
 	if procHash != 0 {
 		for i := uintptr(0); i < uintptr(exportDir.NumberOfNames); i++ {
-			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, *(*uint32)(unsafe.Add(addrOfNames, i*sizeofUint32)))))
+			currentName := windows.BytePtrToString((*byte)(unsafe.Add(module, sliceOfNames[i])))
 			if Hash(currentName) == procHash {
 				return currentName
 			}
